@@ -5,6 +5,9 @@
 #
 # Please note that this init script is agnostic of the mysqld pidfile: it
 # starts and stops mysqld without taking a look at the pidfile.
+#
+# Please note that this init script is not reentrant: it may behave strangely
+# if multiple instances of it run at the same time.
 
 use integer;
 use strict;
@@ -14,9 +17,6 @@ use IO::Socket::UNIX qw(SOL_SOCKET SO_PEERCRED);
 use Sys::Hostname qw();
 
 sub WNOHANG() {1}
-#sub LOCK_SH() {1}
-#sub LOCK_EX() {2}
-#sub LOCK_NB() {4}
 sub F_WRLCK() {1}
 sub F_GETLK() {5}
 sub F_SETLK() {6}
@@ -64,19 +64,62 @@ sub get_defaults() {
 
   if (exists $defaults->{datadir} and not
       (!defined $defaults->{datadir} or 0 == length($defaults->{datadir}))) {
-    return "my.cnf must not have datadir specified for portable MariaDB.";
+    return "my.cnf must not have datadir specified for Portable MariaDB.";
   }
 
-  if (defined $defaults->{socket}) {
-    # mysqld would treat a relative --socket= relative to --datadir=, so we make
-    # it relative to $cwd here.
+  if (exists $defaults->{console} and not
+      (!defined $defaults->{console} or 0 == length($defaults->{console}))) {
+    return "my.cnf must not have console specified for Portable MariaDB.";
+  }
+
+  if (defined $defaults->{socket} and length($defaults->{socket}) > 0) {
     if (substr($defaults->{socket}, 0, 1) ne '/') {
+      # mysqld would treat a relative --socket= relative to --datadir= even with
+      # --socket=./BLAH, so we make it relative to $cwd here.
       $defaults->{socket} =~ s@\A([.]/+)+@@;
       substr($defaults->{socket}, 0, 0, "$cwd/");
     }
     $defaults->{'.socket'} = $defaults->{socket};
   } else {
     $defaults->{'.socket'} = "$cwd/mysqld.sock";
+  }
+
+  if (defined $defaults->{'log-error'} and
+      length($defaults->{'log-error'}) > 0) {
+    if (substr($defaults->{'log-error'}, 0, 1) ne '/') {
+      # mysqld would treat a relative --log-error= relative to --datadir= even with
+      # --log-error=./BLAH, so we make it relative to $cwd here.
+      $defaults->{'log-error'} =~ s@\A([.]/+)+@@;
+      substr($defaults->{'log-error'}, 0, 0, "$cwd/");
+    }
+  }
+  $defaults->{'.log-error'} = $defaults->{'log-error'};
+  
+  if (defined $defaults->{'pid-file'} &&
+      length($defaults->{'pid-file'}) > 0) {
+    if (substr($defaults->{'pid-file'}, 0, 1) ne '/') {
+      # mysqld would treat a relative --pid-file= relative to --datadir=, so
+      # we make it relative to $cwd here.
+      $defaults->{'pid-file'} =~ s@\A([.]/+)+@@;
+      substr($defaults->{'pid-file'}, 0, 0, "$cwd/");
+    }
+    $defaults->{'.pid-file'} = $defaults->{'pid-file'};
+  } else {
+    # mysqld insists on creating a pidfile, so we supply a reasonable default.
+    $defaults->{'.pid-file'} = "$cwd/mysqld.pid";
+  }
+
+  if (defined $defaults->{'character-sets-dir'} &&
+      length($defaults->{'character-sets-dir'}) > 0) {
+    if (substr($defaults->{'character-sets-dir'}, 0, 1) ne '/') {
+      # mysqld would treat a relative --character-sets-dir= relative to
+      # --datadir=, so we make it relative to $cwd here.
+      $defaults->{'character-sets-dir'} =~ s@\A([.]/+)+@@;
+      substr($defaults->{'character-sets-dir'}, 0, 0, "$cwd/");
+    }
+    $defaults->{'.character-sets-dir'} = $defaults->{'character-sets-dir'};
+  } else {
+    $defaults->{'.character-sets-dir'} = "./share/mysql/charsets";
   }
 
   if (defined $defaults->{language}) {
@@ -115,6 +158,7 @@ sub find_stop_socket($) {
       # This is Linux-specific.
       my $req = pack("Sx30", F_WRLCK);
       my $res = $req;
+      # Use the same kind of locking my_lock() in mysqld does.
       if (fcntl($f, F_GETLK, $res) and
           substr($res, 0, 2) eq substr($req, 0, 2)) {
         my $pid = length($res) >= 16 && substr($res, 12, 4) ne "\0\0\0\0" ?
@@ -264,9 +308,15 @@ sub start($) {
   die "$0: could not remove: $defaults->{'.socket'}" if
       -e "$defaults->{'.socket'}";
 
-  my $logfn = "$cwd/mysqld.new.log";
+  my $req_logfn = (defined $defaults->{'.log-error'} and
+                   length($defaults->{'.log-error'}) > 0) ?
+                  $defaults->{'.log-error'} : undef;
+
+  my $logfn = defined $req_logfn ? $req_logfn : "$cwd/mysqld.new.log";
   my $logf;
   die "$0: open for append: $logfn: $!\n" if !open $logf, '>>', $logfn;
+  my $logsize0 = sysseek($logf, 0, 2);  # EOF.
+  die "$0: could not get log size: $!\n" if !defined $logsize0;
   my $pid = fork();
   die "$0: fork: $!\n" if !defined $pid;
   if (!$pid) {  # Child;
@@ -276,41 +326,40 @@ sub start($) {
     die "child: chdir $cwd: $!\n"if !chdir $cwd;
     # TODO(pts): Close other filehandles.
     die "child: setpgrp: $!\n" if !setpgrp(0, 0);
-    my @pid_args;  # !! relative to datadir
-    push @pid_args, '--pid-file=mysqld.pid' if !defined $defaults->{'pid-file'};
-    my $fx;
-    die if !open $fx, '>', '/tmp/mt';
-    my $fy;
-    die if !open $fy, '>&', $fy;
     die "child: exec: $!\n" if !exec(
         './bin/mysqld',
         '--defaults-file=./my.cnf',  # Must be the 1st argument.
-        # Values specified here override values specified in defaults-file.
-        '--port=3377', '--datadir=./data',
-        @pid_args,
-        #'--character-set-server=utf8',  # !!
+        # Values specified below override values specified in my.cnf .
+        '--datadir=./data',
         "--socket=$defaults->{'.socket'}",
         "--language=$defaults->{'.language'}",
-        '--console');  # !!
+        "--pid-file=$defaults->{'.pid-file'}",
+        "--character-sets-dir=$defaults->{'.character-sets-dir'}",
+        '--console');  # Overrides and clear the MySQL log_error variable.
     exit(127);
   }
-  my ($sec, $min, $hour, $mday, $mon, $year) = gmtime();
-  my $logid = sprintf("%04d-%02d-%02d.%02d:%02d:%02d.%05d", 1900 + $year, $mon + 1, $mday, $hour, $min, $sec, $pid);
-  # TODO(pts): Also include the date in the jobname.
-  die "$0: rename $cwd/mysqld.new.log to $cwd/mysqld.$logid.log: $!\n" if
-      !rename("$cwd/mysqld.new.log", "$cwd/mysqld.$logid.log");
 
+  close $logf;
+  my $read_logfn = $logfn;
+  if (!defined $req_logfn) {
+    my ($sec, $min, $hour, $mday, $mon, $year) = gmtime();
+    my $logid = sprintf('%04d-%02d-%02d.%02d:%02d:%02d.%05d', 1900 + $year,
+                        $mon + 1, $mday, $hour, $min, $sec, $pid);
+    $read_logfn = "cwd/mysqld.$logid.log";
+    die "$0: rename $logfn to $read_logfn: $!\n" if
+        !rename($logfn, $read_logfn);
+  }
   my $rlogf;
-  die "$0: open $cwd/mysqld.$logid.log: $!\n" if
-      !open($rlogf, '<', "$cwd/mysqld.$logid.log");
+  die "$0: open $read_logfn: $!\n" if
+      !open($rlogf, '<', $read_logfn);
 
   my $retries = 400;  # Wait 40 seconds. (mysqld waits 30 seconds internally.)
   while (1) {
     my $gotpid = waitpid($pid, WNOHANG);
     # Doesn't work with `seek', it caches too much after the first read.
-    die "$0: seek: $!\n" if !sysseek $rlogf, 0, 0;
+    die "$0: seek: $!\n" if !sysseek $rlogf, $logsize0, 0;
     my $rlog;
-    die "$0: read: #!\n" if !defined(sysread($rlogf, $rlog, 4096));
+    die "$0: read: #!\n" if !defined(sysread($rlogf, $rlog, 32768));
     if (!$gotpid or $gotpid != $pid) {
       # We don't match for the `ready for connections' string, because it's
       # language-dependent.
@@ -372,8 +421,9 @@ sub start($) {
         " --port=" . ($defaults->{port} + 0) : "";
     my $localhost = '127.0.0.1';
     if (!defined $defaults->{'bind-address'} or
-        $defaults->{'bind-address'} eq '') {
-      $host = '127.0.0.1';
+        length($defaults->{'bind-address'}) == 0) {
+      $host = $localhost;
+      undef $localhost;
     } elsif ($defaults->{'bind-address'} eq '0.0.0.0' or
              $defaults->{'bind-address'} =~ /\A0+\Z(?!\n)/) {
       $host = Sys::Hostname::hostname();
