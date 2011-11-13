@@ -3,12 +3,15 @@
 # mariadb_init.pl: Simple init script for mariadb-compact
 # by pts@fazekas.hu at Sat Nov  5 20:22:42 CET 2011
 #
+# Please note that this init script is agnostic of the mysqld pidfile: it
+# starts and stops mysqld without taking a look at the pidfile.
 
 use integer;
 use strict;
 use Errno qw(ESRCH);
 use Cwd qw();
 use IO::Socket::UNIX qw(SOL_SOCKET SO_PEERCRED);
+use Sys::Hostname qw();
 
 sub WNOHANG() {1}
 
@@ -63,6 +66,22 @@ sub get_defaults() {
   } else {
     $defaults->{'.socket'} = "$cwd/mysqld.sock";
   }
+
+  if (defined $defaults->{language}) {
+    if ($defaults->{language} !~ m@/@) {
+      # Default directory would be:
+      # "/usr/local/mysql/share/mysql/$defaults->{language}/errmsg.sys".
+      $defaults->{language} = "./share/mysql/$defaults->{language}";
+    } elsif (substr($defaults->{language}, 0, 1) ne '/') {
+      # Default directory if starting with `./' is $cwd.
+      $defaults->{language} =~ s@\A([.]/+)+@@;
+      substr($defaults->{language}, 0, 0, "./");
+    }
+    $defaults->{'.language'} = $defaults->{language};
+  } else {
+    $defaults->{'.language'} = './share/mysql/english';
+  }
+
   $defaults
 }
 
@@ -182,7 +201,8 @@ sub start($) {
         @pid_args,
         #'--character-set-server=utf8',  # !!
         "--socket=$defaults->{'.socket'}",
-        '--language=./share/mysql/english', '--console');
+        "--language=$defaults->{'.language'}",
+        '--console');  # !!
     exit(127);
   }
   my ($sec, $min, $hour, $mday, $mon, $year) = gmtime();
@@ -195,6 +215,7 @@ sub start($) {
   die "$0: open $cwd/mysqld.$logid.log: $!\n" if
       !open($rlogf, '<', "$cwd/mysqld.$logid.log");
 
+  my $retries = 300;  # Wait 30 seconds.
   while (1) {
     my $gotpid = waitpid($pid, WNOHANG);
     # Doesn't work with `seek', it caches too much after the first read.
@@ -202,7 +223,28 @@ sub start($) {
     my $rlog;
     die "$0: read: #!\n" if !defined(sysread($rlogf, $rlog, 4096));
     if (!$gotpid or $gotpid != $pid) {
-      last if 0 <= index($rlog, ' [Note] ./bin/mysqld: ready for connections.');
+      # We don't match for the `ready for connections' string, because it's
+      # language-dependent.
+      #
+      #   English: [Note] ./bin/mysqld: ready for connections.
+      #   German: [Note] ./bin/mysqld: bereit f\u00FCr Verbindungen.
+      #
+      # Even the subsequent line is language-dependent, but most languages have
+      # either socket or Socket, so we match on that:
+      #
+      #   English: Version: '5.2.9-MariaDB'  socket: '/home/pts/mariadb-compact/foo.sock'  port: 3377  (MariaDB - http://mariadb.com/)
+      #   German: Version: '5.2.9-MariaDB'  Socket: '/home/pts/mariadb-compact/foo.sock'  Port: 3377  (MariaDB - http://mariadb.com/)
+      if ($rlog =~ /^Version: '[^'\\]+'  [sS]ocket: '([^'\\']+)'  /m) {
+        if ($1 ne $defaults->{'.socket'}) {
+          print "socket-mismatch\n";
+          exit 6;
+        }
+        last;
+      }
+      if (--$retries < 0) {
+        print "startup-timeout\n";
+        exit 5;
+      }
       select undef, undef, undef, 0.1;
       next
     }
@@ -227,11 +269,46 @@ sub start($) {
   }
 
   my $sockq = $defaults->{'.socket'};
-if ($sockq =~ y@-_./+a-zA-Z0-9@@c) {
-  $sockq =~ s@'@'\\''@g;
-  $sockq = "'$sockq'";
-}
-  print "done (PID $pid).\nConnect with: mysql --socket=$sockq --user=root --database=test\n";
+  if ($sockq =~ y@-_./+a-zA-Z0-9@@c) {
+    $sockq =~ s@'@'\\''@g;
+    $sockq = "'$sockq'";
+  }
+  my $conntcplocal = "";
+  my $conntcp = "";
+  my $connauth = " --user=root --database=test";
+  if (!exists $defaults->{'skip-networking'}) {
+    my $host;
+    # `mysql --port=3306' is the default.
+    my $portspec = defined $defaults->{port} && $defaults->{port} != 3306 ?
+        " --port=" . ($defaults->{port} + 0) : "";
+    my $localhost = '127.0.0.1';
+    if (!defined $defaults->{'bind-address'} or
+        $defaults->{'bind-address'} eq '') {
+      $host = '127.0.0.1';
+    } elsif ($defaults->{'bind-address'} eq '0.0.0.0' or
+             $defaults->{'bind-address'} =~ /\A0+\Z(?!\n)/) {
+      $host = Sys::Hostname::hostname();
+      if (index($host, '.') < 0) {
+        my @res = gethostbyname($host);
+        if (@res) {
+          my @hosts = $res[0];
+          push @hosts, split(/\s+/, $res[1]) if @res > 1;
+          @hosts = grep { $_ ne 'localhost' and $_ ne 'localhost.localdomain' }
+              @hosts;
+          $host = $hosts[0] if @hosts;
+        }
+      }
+    } else {
+      $host = $defaults->{'bind-address'};
+      undef $localhost;
+    }
+    $conntcp = "Connect with: mysql --host=$host$portspec$connauth\n";
+    $conntcplocal = "Connect with: mysql --host=$localhost$portspec$connauth\n" if
+        defined $localhost;
+  }
+  print "done (PID $pid).\n",
+        "Connect with: mysql --socket=$sockq$connauth\n",
+        $conntcplocal, $conntcp;
 }
 
 sub stop() {
