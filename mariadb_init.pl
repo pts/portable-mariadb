@@ -21,8 +21,10 @@ sub F_WRLCK() {1}
 sub F_GETLK() {5}
 sub F_SETLK() {6}
 
-die "Usage: $0 { start | stop | restart }\n" if @ARGV != 1 or
-    ($ARGV[0] ne 'start' and $ARGV[0] ne 'stop' and $ARGV[0] ne 'restart');
+die "Usage: $0 { start | stop | restart | stop-set-root-passowrd }\n" if
+    @ARGV != 1 or
+    ($ARGV[0] ne 'start' and $ARGV[0] ne 'stop' and $ARGV[0] ne 'restart' and
+     $ARGV[0] ne 'stop-set-root-password');
 my $cmd = $ARGV[0];
 
 my $cwd = Cwd::abs_path($0);  # Also resolves symlinks.
@@ -46,6 +48,7 @@ sub get_defaults() {
   $output =~ s@\s+\Z(?!\n)@@;
   $output =~ s@\A\s*@ @;
   return "(multiline)$output" if $output =~ /\n/;
+  $output = " --" if $output eq " ";
   return "(bad-prefix)$output" if $output !~ /\A --/;
   my $defaults = {};
   # Spaces in values etc. are not escaped, so we just split on ` --'.
@@ -413,7 +416,7 @@ sub start($) {
   }
   my $conntcplocal = "";
   my $conntcp = "";
-  my $connauth = " --user=root --database=test";
+  my $connauth = " --user=root --database=test --password";
   if (!exists $defaults->{'skip-networking'}) {
     my $host;
     # `mysql --port=3306' is the default.
@@ -450,7 +453,8 @@ sub start($) {
         $conntcplocal, $conntcp;
 }
 
-sub stop() {
+sub stop($) {
+  my ($do_set_root_password) = @_;
   print "Stopping MariaDB in $cwd: ";
 
   my $defaults = get_defaults();
@@ -465,22 +469,54 @@ sub stop() {
   my $server_pid = get_server_unix_pid($defaults, 1);
   if (!($server_pid and $server_pid > 0)) {
     print "not-running\n";
-    exit 1;
+    exit 1 if !$do_set_root_password;
+  } else {
+    stop_low($server_pid, $defaults);
+
+    # This is not strictly necessary, usually MariaDB cleans up after itself.
+    unlink "$cwd/mysqld.pid";  # TODO(pts): Get rid of the race.
+
+    print "done.\n";
   }
 
-  stop_low($server_pid, $defaults);
-
-  # This is not strictly necessary, usually MariaDB cleans up after itself.
-  unlink "$cwd/mysqld.pid";  # TODO(pts): Get rid of the race.
-
-  print "done.\n";
+  if ($do_set_root_password) {
+    # TODO(pts): Try with `stty -echo'.
+    my $password = readpipe('exec bash -c \'read -s -p "Enter new root password for Portable MariaDB: " P; echo >&2; echo -n "$P"\'');
+    die "$0: could not read password\n" if !defined $password;
+    die "$0: multiline password\n" if $password =~ /\n/;
+    $password =~ y@\r@@d;
+    die "$0: control characters in password\n" if $password =~ y@\x00-\x1F@@;
+    die "$0: password with leading whitespace\n" if $password =~ m@\A\s@;
+    die "$0: password with trailing whitespace\n" if $password =~ m@\s\Z(?!\n)@;
+    my $passwordq = $password;
+    $passwordq =~ s@([\\'])@\\$1@g;
+    die "$0: could not start password changing command: $!\n"
+        if !open(my $pipe, "| exec $cwdq/bin/mysqld --bootstrap " .
+        "--datadir=$cwdq/data --language=$cwdq/share/mysql/english ".
+        "--console --log-warnings=0 --loose-skip-innodb --loose-skip-pbxt " .
+        "--loose-skip-ndbcluster --loose-skip-federated --loose-skip-aria " .
+        "--loose-skip-maria --loose-skip-archive");
+    my $newpexpr = length($password) == 0 ? "''" : "PASSWORD('$passwordq')";
+    select($pipe); $| = 1; select(STDOUT);
+    die "$0: print: $!\n" if !print(
+        $pipe "UPDATE mysql.user SET password=$newpexpr WHERE user='root'");
+    die "$0: error changing password, status=0x" . sprintf("%x", $?) if
+        !close($pipe);
+    if (0 == length($password)) {
+      print "Password changed to empty. (INSECURE!)\n";
+    } else {
+      print "Non-empty password set.\n";
+    }
+  }
 }
 
 $| = 1;
 if ($cmd eq 'start') {
   start(0);
 } elsif ($cmd eq 'stop') {
-  stop();
+  stop(0);
+} elsif ($cmd eq 'stop-set-root-password') {
+  stop(1);
 } elsif ($cmd eq 'restart') {
   start(1);
 }
