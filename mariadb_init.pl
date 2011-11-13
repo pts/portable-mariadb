@@ -315,7 +315,7 @@ sub start($) {
                    length($defaults->{'.log-error'}) > 0) ?
                   $defaults->{'.log-error'} : undef;
 
-  my $logfn = defined $req_logfn ? $req_logfn : "$cwd/mysqld.new.log";
+  my $logfn = defined $req_logfn ? $req_logfn : "$cwd/log/mysqld.new.log";
   my $logf;
   die "$0: open for append: $logfn: $!\n" if !open $logf, '>>', $logfn;
   my $logsize0 = sysseek($logf, 0, 2);  # EOF.
@@ -348,7 +348,7 @@ sub start($) {
     my ($sec, $min, $hour, $mday, $mon, $year) = gmtime();
     my $logid = sprintf('%04d-%02d-%02d.%02d:%02d:%02d.%05d', 1900 + $year,
                         $mon + 1, $mday, $hour, $min, $sec, $pid);
-    $read_logfn = "$cwd/mysqld.$logid.log";
+    $read_logfn = "$cwd/log/mysqld.$logid.log";
     die "$0: rename $logfn to $read_logfn: $!\n" if
         !rename($logfn, $read_logfn);
   }
