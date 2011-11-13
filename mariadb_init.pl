@@ -14,6 +14,12 @@ use IO::Socket::UNIX qw(SOL_SOCKET SO_PEERCRED);
 use Sys::Hostname qw();
 
 sub WNOHANG() {1}
+#sub LOCK_SH() {1}
+#sub LOCK_EX() {2}
+#sub LOCK_NB() {4}
+sub F_WRLCK() {1}
+sub F_GETLK() {5}
+sub F_SETLK() {6}
 
 die "Usage: $0 { start | stop | restart }\n" if @ARGV != 1 or
     ($ARGV[0] ne 'start' and $ARGV[0] ne 'stop' and $ARGV[0] ne 'restart');
@@ -55,6 +61,12 @@ sub get_defaults() {
       }
     }
   }
+
+  if (exists $defaults->{datadir} and not
+      (!defined $defaults->{datadir} or 0 == length($defaults->{datadir}))) {
+    return "my.cnf must not have datadir specified for portable MariaDB.";
+  }
+
   if (defined $defaults->{socket}) {
     # mysqld would treat a relative --socket= relative to --datadir=, so we make
     # it relative to $cwd here.
@@ -85,11 +97,83 @@ sub get_defaults() {
   $defaults
 }
 
-# Connect to Unix domain socket (mysqld.sock), get the PID of the server.
-sub get_server_unix_pid($) {
+# Find the Unix domain socket where the mysqld runnin in $cwd is listening,
+# and set $defaults->{'.stop_socket'} to the filename if found.
+#
+# This function is useful for finding the mysqld to stop, even if we don't
+# know the --socket= flag it was started with.
+sub find_stop_socket($) {
   my ($defaults) = @_;
+  return if exists $defaults->{'.stop_socket'};
+  my %pids;
+  my @files = ("data/aria_log_control", "data/ibdata1", "data/iblogfile0",
+               "data/ib_logfile1", "data/tc.log",
+               "data/mysql/host.MYD");  # Usually not locked.
+  for my $fn (@files) {
+    my $f;
+    if (open $f, '+<', "$cwd/$fn") {
+      # This is Linux-specific.
+      my $req = pack("Sx30", F_WRLCK);
+      my $res = $req;
+      if (fcntl($f, F_GETLK, $res) and
+          substr($res, 0, 2) eq substr($req, 0, 2)) {
+        my $pid = length($res) >= 16 && substr($res, 12, 4) ne "\0\0\0\0" ?
+                      unpack('I', substr($res, 12, 4)) : # 32-bit Linux.
+                      unpack('I', substr($res, 24, 4));  # 64-bit Linux.
+        $pids{$pid} = 1 if $pid;
+      }
+      close $f;
+    }
+  }
+  return if !%pids;
+  my @our_pids;
+  my @absfiles = map { "$cwd/$_" } @files;
+  my %socket_numbers;
+  for my $pid (sort { $a <=> $b } keys %pids) {
+    my $df;
+    my $is_found = 0;
+    my %my_socket_numbers;
+    if (opendir($df, "/proc/$pid/fd")) {
+      while (my $entryf = readdir($df)) {
+        next if $entryf =~ y@0-9@@c;
+        my $target = readlink("/proc/$pid/fd/$entryf");
+        if (!defined $target) {
+        } elsif (grep { $_ eq $target } @absfiles) {
+          $is_found = 1;
+        } elsif ($target =~ m@\Asocket:\[(\d+)\]\Z(?!\n)@) {
+          $my_socket_numbers{$1} = 1;
+        }
+      }
+      die if !closedir $df;
+      @socket_numbers{keys %my_socket_numbers} = (1)x keys %my_socket_numbers
+          if $is_found;
+    }
+  }
+  return if !%socket_numbers;
+  my %sockets;
+  if (open my $uf, '<', '/proc/net/unix') {
+    while (my $line = <$uf>) {
+      chomp $line;
+      my @items = split(/\s+/, $line, 8);
+      $sockets{$items[7]} = 1 if exists $socket_numbers{$items[6]};
+    }
+    die if !close $uf;
+  }
+  return if keys(%sockets) != 1;
+  my $socket = [keys%sockets]->[0];
+  return if !-S $socket;
+  $defaults->{'.stop_socket'} = $socket;
+  return  # undef.
+}
+
+# Connect to Unix domain socket (mysqld.sock), get the PID of the server.
+sub get_server_unix_pid($;$) {
+  my ($defaults, $is_stop) = @_;
   # TODO(pts): Does this respect the Timeout=>?
-  my $sock = new IO::Socket::UNIX(Peer=>$defaults->{'.socket'}, Timeout=>3);
+  my $peer = $defaults->{'.socket'};
+  $peer= $defaults->{'.stop_socket'} if $is_stop and defined
+      $defaults->{'.stop_socket'};
+  my $sock = new IO::Socket::UNIX(Peer=>$peer, Timeout=>3);
   return undef if !$sock;
   my $res = $sock->getsockopt(SOL_SOCKET, SO_PEERCRED);
   die "$0: peercred: $!\n" if
@@ -107,7 +191,7 @@ sub stop_low($$) {
       print "error($errnum)\n";
       exit 2;
     }
-    my $server_pid2 = get_server_unix_pid($defaults);
+    my $server_pid2 = get_server_unix_pid($defaults, 1);
     if (!($server_pid2 and $server_pid2 > 0)) {  # Killed by someone else.
       print "done.\n";
       return;
@@ -124,7 +208,7 @@ sub stop_low($$) {
 
   my $is_accepting = 1;
   for (my $i = 0; $i < 50; ++$i) {  # 5 seconds to stop accepting connections.
-    my $server_pid3 = get_server_unix_pid($defaults);
+    my $server_pid3 = get_server_unix_pid($defaults, 1);
     if (!($server_pid3 and $server_pid3 > 0)) {
       $is_accepting = 0;
       last
@@ -165,7 +249,8 @@ sub start($) {
     exit 9;
   }
   
-  my $server_pid = get_server_unix_pid($defaults);
+  find_stop_socket($defaults);
+  my $server_pid = get_server_unix_pid($defaults, 1);
   if ($server_pid and $server_pid > 0) {
     if (!$is_already_ok) {
       print "already-running\n";
@@ -261,7 +346,7 @@ sub start($) {
   }
 
   # This is mostly to verify that the Unix domain socket connection works.
-  my $pid2 = get_server_unix_pid($defaults);
+  my $pid2 = get_server_unix_pid($defaults, 0);
   if (!defined $pid2) {
     my $errnum = $! + 0;
     print "error-unix-connect($errnum)\n";
@@ -326,7 +411,8 @@ sub stop() {
     exit 9;
   }
 
-  my $server_pid = get_server_unix_pid($defaults);
+  find_stop_socket($defaults);
+  my $server_pid = get_server_unix_pid($defaults, 1);
   if (!($server_pid and $server_pid > 0)) {
     print "not-running\n";
     exit 1;
