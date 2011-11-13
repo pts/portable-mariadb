@@ -41,7 +41,7 @@ if ($cwdq =~ y@-_./+a-zA-Z0-9@@c) {
 
 sub get_defaults() {
   my $output = readpipe(
-      "exec bin/mysqld --defaults-file=$cwdq/my.cnf --print-defaults 2>&1");
+      "exec $cwdq/bin/mysqld --defaults-file=$cwdq/my.cnf --print-defaults 2>&1");
   # Please note that mysqld returns $? == 0 here even on an error.
   return $output if $? or $output =~ m@^(Fatal Error|Error|Could not)@mi;
   $output =~ s@\A.* would have been started with the following arguments:\n@@;
