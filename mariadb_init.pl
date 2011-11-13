@@ -193,6 +193,10 @@ sub start($) {
     die "child: setpgrp: $!\n" if !setpgrp(0, 0);
     my @pid_args;  # !! relative to datadir
     push @pid_args, '--pid-file=mysqld.pid' if !defined $defaults->{'pid-file'};
+    my $fx;
+    die if !open $fx, '>', '/tmp/mt';
+    my $fy;
+    die if !open $fy, '>&', $fy;
     die "child: exec: $!\n" if !exec(
         './bin/mysqld',
         '--defaults-file=./my.cnf',  # Must be the 1st argument.
@@ -215,7 +219,7 @@ sub start($) {
   die "$0: open $cwd/mysqld.$logid.log: $!\n" if
       !open($rlogf, '<', "$cwd/mysqld.$logid.log");
 
-  my $retries = 300;  # Wait 30 seconds.
+  my $retries = 400;  # Wait 40 seconds. (mysqld waits 30 seconds internally.)
   while (1) {
     my $gotpid = waitpid($pid, WNOHANG);
     # Doesn't work with `seek', it caches too much after the first read.
