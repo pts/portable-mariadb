@@ -345,7 +345,7 @@ sub start($) {
     my ($sec, $min, $hour, $mday, $mon, $year) = gmtime();
     my $logid = sprintf('%04d-%02d-%02d.%02d:%02d:%02d.%05d', 1900 + $year,
                         $mon + 1, $mday, $hour, $min, $sec, $pid);
-    $read_logfn = "cwd/mysqld.$logid.log";
+    $read_logfn = "$cwd/mysqld.$logid.log";
     die "$0: rename $logfn to $read_logfn: $!\n" if
         !rename($logfn, $read_logfn);
   }
