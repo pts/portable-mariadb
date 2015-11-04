@@ -1,0 +1,32 @@
+<html><head>
+<title>Portable MariaDB: portable, small, precompiled, statically linked MariaDB binary distribution for Linux i386</title>
+<meta http-equiv="content-type" content="text/html; charset=utf-8">
+</head><body>
+<h1>Portable MariaDB: portable, small, precompiled, statically linked MariaDB binary distribution for Linux i386</h1>
+<p>Portable MariaDB is a small, portable binary distribution of the SQL server MariaDB (Monty's fork of MySQL) for Linux i386 (32-bit). Only the mysqld binary and a versatile init script are included. Portable MariaDB can be run by any user in any directory, it doesn't try to access any mysqld data or config files outside its directory. Portable MariaDB can coexist with regular mysqld (MySQL or MariaDB) and other instances of Portable MariaDB on a single machine, as long as they are not configured to listen on the same TCP port. The only dependency of Portable MariaDB is glibc 2.4 (available in Ubuntu Hardy or later).</p>
+<p>Why use Portable MariaDB?</p><ul><li>It's small (not bloated). Fast to dowload, fast to extract, fast to install. Quick size comparison: mariadb-5.2.9-Linux-i686.tar.gz is 144 MB, the corresponding Portable MariaDB .tbz2 is less than 6 MB. </li><li>It's portable: does not interfere with other MySQL server installations on the same machine. </li><li>It's self-contained and consistent: copy the database and the configuration in a single directory from one machine to another. </li></ul>
+<h2><a name="Installation"></a>Installation<a href="#Installation" class="section_anchor"></a></h2>
+<p>To run Portable MariaDB, you need a Linux system with glibc 2.4 (e.g. Ubuntu Hardy) or later. 32-bit and 64-bit systems are fine. For 64-bit systems you need the 32-bit compatibility libraries installed. You also need Perl.</p>
+<pre>$ cd /tmp  # Or any other with write access.
+$ BASE=https://raw.githubusercontent.com/pts/portable-mariadb/master/release/
+$ wget -O /tmp/portable-mariadb.tbz2 $BASE/portable-mariadb.tbz2
+$ (cd /tmp && tar xjvf /tmp/portable-mariadb.tbz2)
+$ chmod 700 /tmp/portable-mariadb  # For security.
+$ /tmp/portable-mariadb/mariadb_init.pl stop-set-root-password</pre>
+<h2><a name="Usage"></a>Usage<a href="#Usage" class="section_anchor"></a></h2>
+<p>For security, don't do anything as root.</p>
+<pre>$ cd /tmp/portable-mariadb
+$ ./mariadb_init.pl restart
+Connect with: mysql --socket=/tmp/portable-mariadb/mysqld.sock --user=root --database=test --password
+Connect with: mysql --host=127.0.0.1 --user=root --database=test --password</pre>
+<p>Feel free to take a look at <tt>/tmp/portable-mariadb/my.cnf</tt> , make modifications, and restart mysqld so that the modifications take effect.</p>
+<h2><a name="Security"></a>Security<a href="#Security" class="section_anchor"></a></h2>
+<p>By default, connections are accepted from localhost (Unix domain socket and TCP) only, all MySQL users are refused (except if a password has been set for root above), and root has unrestricted access. Unix permissions (such as the <tt>chmod 700</tt> above) are protecting against data theft and manipulation on the file level.</p>
+<p>It is strongly recommended to change the password of root to a non-empty, strong password before populating the database.</p>
+<h2><a name="Java_support"></a>Java support<a href="#Java_support" class="section_anchor"></a></h2>
+<p>Java clients with JDBC (MySQL Connector/J) are fully supported. Please note that Java doesn't support Unix doman socket, so make sure in my.cnf that mysqld listens on a TCP port. Please make sure you have <tt>?characterEncoding=UTF8</tt> specified in your JDBC connection URL, otherwise some non-ASCII, non-Latin-1 characters would be converted to <tt>?</tt>.</p>
+<h2><a name="Unicode_support"></a>Unicode support<a href="#Unicode_support" class="section_anchor"></a></h2>
+<p>Just as with MariaDB. All encodings and collations are supported. The latin1 encoding is the default, which can be changed in my.cnf.</p>
+<h2><a name="Language_support"></a>Language support<a href="#Language_support" class="section_anchor"></a></h2>
+<p>All natural languages (of MariaDB) are supported for error messages. Set the `language' flag in my.cnf accordingly. English is the default.</p>
+</body></html>
